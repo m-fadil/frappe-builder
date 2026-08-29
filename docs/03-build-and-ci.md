@@ -4,20 +4,55 @@ title: Image Build and CI/CD Pipeline
 
 # 03 - Image Build & CI/CD Pipeline
 
+This document explains the image build lifecycle, the strict separation between Build-Time and Runtime secrets, and the automated GitHub Actions CI/CD workflows.
+
 ---
 
-## 1. Local Image Build
+## 1. Build-Time vs. Runtime Secrets Architecture
+
+A core design rule of this setup is the **strict separation between Build-Time artifacts and Runtime configurations**:
+
+```text
+[ BUILD-TIME (CI / GitHub Actions) ]
+  • apps.json + Git PATs (from GitHub Secrets)
+  • Source code & asset compilation
+  • Output: Immutable Docker Image (e.g., ghcr.io/org/custom-frappe:v1.2.0)
+         │
+         │ (Pushed to Registry - NO runtime .env or DB credentials inside)
+         ▼
+[ RUNTIME (Production Server / Target Host) ]
+  • Target Server .env (DB_PASSWORD, SITES_RULE, PORT, REDIS_CACHE, etc.)
+  • Reads CUSTOM_TAG=v1.2.0
+  • Execution: docker compose --env-file .env up -d / ./rollout.sh .env
+```
+
+| Scope | Artifact / Secret | Where Stored | Handled By |
+|---|---|---|---|
+| **Build-Time** | Git PATs (`CRM_PAT`, `GITLAB_TOKEN`), `apps.json` | GitHub Repository Secrets | BuildKit Secret Mount (`--secret id=apps_json`) |
+| **Runtime** | Database passwords, SMTP keys, API tokens, `.env` files | Target Server / GitOps Repo / CD Secrets | Docker Compose runtime environment (`--env-file`) |
+
+> **Crucial Rule:** The deployment `.env` file is **never baked into the container image**. The image remains a generic, reusable artifact across development, staging, and production environments.
+
+---
+
+## 2. Local Image Build
 
 Build the production image locally using Docker Buildx:
 
 ```bash
+# Optional: resolve token placeholders for private repositories
+export CRM_PAT="ghp_xxx"
+envsubst < apps.json > /tmp/apps.json
+
 docker build \
   --no-cache \
   --build-arg FRAPPE_PATH=https://github.com/frappe/frappe \
   --build-arg FRAPPE_BRANCH=version-16 \
-  --secret id=apps_json,src=apps.json \
+  --secret id=apps_json,src=/tmp/apps.json \
   --tag my-org/custom-frappe:16.0.0 \
   --file Containerfile .
+
+rm /tmp/apps.json
 ```
 
 ### Build Arguments:
@@ -33,20 +68,44 @@ docker build \
 
 ---
 
-## 2. GitHub Actions Release Workflow
+## 3. GitHub Actions Workflows
 
-The release automation in `.github/workflows/release.yml` triggers on version tags (`v*.*.*`).
+### A. Continuous Integration (`ci.yml`)
+Triggers automatically on Pull Requests and pushes to `main`, `master`, `develop`, or `custom/*` branches:
+- Injects repository secrets into `apps.json`.
+- Builds a temporary image with BuildKit secret mounts.
+- Executes container smoke tests (verifies Frappe apps, `assets.json` generation, and `bench --version`).
 
-### Workflow Steps:
-
-1. **Verify Job:**
-   - Builds a local `linux/amd64` smoke-test image.
-   - Asserts that Frappe core, `assets.json`, and `bench` CLI are valid inside the built container.
-
+### B. Automated Release Pipeline (`release.yml`)
+Triggers on Git Tag pushes matching `v*.*.*` (e.g. `v16.0.0`, `v1.2.3`):
+1. **Verify Job:** Validates build integrity with smoke tests.
 2. **Publish Job (Multi-Arch):**
-   - Sets up QEMU and Buildx.
+   - Sets up QEMU and Buildx for `linux/amd64` and `linux/arm64`.
    - Authenticates to GitHub Container Registry (`ghcr.io`).
    - Uses `docker/metadata-action` to derive SemVer tags:
      - Tag `v16.3.0` emits `ghcr.io/<repo>:16.3.0`, `:16.3`, `:16`, and `:latest`.
-   - Compiles and pushes multi-arch images (`linux/amd64`, `linux/arm64`).
-   - Generates and signs **SLSA Provenance Attestations** via `actions/attest-build-provenance`.
+   - Injects secrets into `apps.json` and compiles multi-arch images.
+   - Pushes images to GHCR.
+   - Attests image provenance with cryptographically verifiable **SLSA Provenance Attestations** (sigstore).
+
+---
+
+## 4. Continuous Deployment (CD) to Server
+
+To automatically deploy the released image tag to a production server:
+
+1. On the production server, update `CUSTOM_TAG` in your `.env` file (or maintain it via GitOps):
+   ```env
+   CUSTOM_IMAGE=ghcr.io/your-org/custom-frappe
+   CUSTOM_TAG=v16.3.0
+   ```
+
+2. Execute the zero-downtime rollout script:
+   ```bash
+   ./rollout.sh .env.prod
+   ./verify.sh .env.prod
+   ```
+
+If orchestrating deployment from GitHub Actions CD:
+- Store the target server's SSH credentials (`SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`) in GitHub Secrets.
+- Add a deployment job in GitHub Actions that connects to the host and triggers `./rollout.sh <env-file>`.
