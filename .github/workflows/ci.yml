@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master, develop, "custom/*"]
+  push:
+    branches: [main, master, develop, "custom/*"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build smoke-test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Containerfile
+          load: true
+          tags: custom-frappe:ci
+          secrets: |
+            id=apps_json,src=apps.json
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test image
+        run: |
+          docker run --rm --entrypoint bash custom-frappe:ci -lc \
+            "test -d /home/frappe/frappe-bench/apps/frappe && test -f /home/frappe/frappe-bench/assets/assets.json && bench --version"

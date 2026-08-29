@@ -1,0 +1,76 @@
+# Provides a service that pulls the latest database backup from a remote Frappe site,
+# restores it into a local site and migrates it.
+#
+# DESTRUCTIVE: restoring drops the target site's existing database.
+# The service sits behind the `restore` profile, so it never starts with a plain
+# `docker compose up -d`. Run it explicitly:
+#
+#   docker compose --profile restore run --rm restore
+#
+# Required variables: RESTORE_SITE, RESTORE_SOURCE_URL, RESTORE_SOURCE_TOKEN.
+
+# Compose extension fields of base compose.yaml. See https://github.com/frappe/frappe_docker/blob/main/compose.yaml
+# Needed for merging compose files.
+x-customizable-image: &customizable_image
+  # By default the image used only contains the `frappe` and `erpnext` apps.
+  # See https://github.com/frappe/frappe_docker/blob/main/docs/02-setup/02-build-setup.md#define-custom-apps
+  # about using custom images.
+  image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-$ERPNEXT_VERSION}
+  pull_policy: ${PULL_POLICY:-always}
+  restart: ${RESTART_POLICY:-unless-stopped}
+
+x-depends-on-configurator: &depends_on_configurator
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+
+x-backend-defaults: &backend_defaults
+  <<: [*depends_on_configurator, *customizable_image]
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+
+services:
+  restore:
+    <<: *backend_defaults
+    platform: linux/amd64
+    profiles:
+      - restore
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - |
+        set -euo pipefail
+        if [ -z "$$RESTORE_SITE" ] || [ -z "$$RESTORE_SOURCE_URL" ] || [ -z "$$RESTORE_SOURCE_TOKEN" ]; then
+          echo "[restore] RESTORE_SITE, RESTORE_SOURCE_URL and RESTORE_SOURCE_TOKEN are required"
+          exit 1
+        fi
+        if [ ! -f "sites/$$RESTORE_SITE/site_config.json" ]; then
+          echo "[restore] Site $$RESTORE_SITE does not exist locally, create it first"
+          exit 1
+        fi
+        auth="Authorization: $$RESTORE_SOURCE_TOKEN"
+        echo "[restore] Fetching latest backup metadata from $$RESTORE_SOURCE_URL"
+        db_path=$$(curl -fsS -H "$$auth" "$$RESTORE_SOURCE_URL/api/method/frappe.utils.backups.fetch_latest_backups" | jq -r '.message.database // empty')
+        if [ -z "$$db_path" ]; then
+          echo "[restore] Source site returned no database backup"
+          exit 1
+        fi
+        file=$$(basename "$$db_path")
+        echo "[restore] Downloading $$file"
+        aria2c -q --no-conf -x 4 -s 4 -c --header="$$auth" -d "/tmp" -o "$$file" "$$RESTORE_SOURCE_URL/backups/$$file"
+        echo "[restore] Restoring into $$RESTORE_SITE, existing data is dropped"
+        bench --site "$$RESTORE_SITE" restore "/tmp/$$file" --db-root-username "$$DB_ROOT_USER" --db-root-password "$$DB_PASSWORD" --force
+        echo "[restore] Migrating $$RESTORE_SITE"
+        bench --site "$$RESTORE_SITE" migrate
+        bench --site "$$RESTORE_SITE" set-admin-password "$$RESTORE_ADMIN_PASSWORD"
+        rm -f "/tmp/$$file"
+        echo "[restore] Done"
+    environment:
+      RESTORE_SITE: ${RESTORE_SITE:-}
+      RESTORE_SOURCE_URL: ${RESTORE_SOURCE_URL:-}
+      RESTORE_SOURCE_TOKEN: ${RESTORE_SOURCE_TOKEN:-}
+      RESTORE_ADMIN_PASSWORD: ${RESTORE_ADMIN_PASSWORD:-admin}
+      DB_ROOT_USER: ${DB_ROOT_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-123}
+    restart: "no"

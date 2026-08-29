@@ -1,0 +1,10 @@
+[
+  {
+    "url": "https://github.com/frappe/raven.git",
+    "branch": "develop"
+  },
+  {
+    "url": "https://github.com/frappe/telephony.git",
+    "branch": "develop"
+  }
+]

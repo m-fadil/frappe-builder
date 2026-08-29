@@ -1,0 +1,98 @@
+# Turns a site restored from production into a safe non-production copy:
+# no outgoing mail, no incoming mail polling, no webhooks, no push/telephony.
+#
+# Run it right after `compose.restore.yaml`, before anyone touches the site:
+#
+#   docker compose --profile sanitize run --rm sanitize
+#
+# Required variable: SANITIZE_SITE.
+#
+# The strongest switch is `mute_emails` in site config, which blocks the email queue
+# framework-wide. Set it once and it survives every restore, because `bench restore`
+# replaces the database, not site_config.json:
+#
+#   docker compose exec backend bench --site <site> set-config mute_emails 1
+
+# Compose extension fields of base compose.yaml. See https://github.com/frappe/frappe_docker/blob/main/compose.yaml
+# Needed for merging compose files.
+x-customizable-image: &customizable_image
+  # By default the image used only contains the `frappe` and `erpnext` apps.
+  # See https://github.com/frappe/frappe_docker/blob/main/docs/02-setup/02-build-setup.md#define-custom-apps
+  # about using custom images.
+  image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-$ERPNEXT_VERSION}
+  pull_policy: ${PULL_POLICY:-always}
+  restart: ${RESTART_POLICY:-unless-stopped}
+
+x-depends-on-configurator: &depends_on_configurator
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+
+x-backend-defaults: &backend_defaults
+  <<: [*depends_on_configurator, *customizable_image]
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+
+services:
+  sanitize:
+    <<: *backend_defaults
+    platform: linux/amd64
+    profiles:
+      - sanitize
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - |
+        set -euo pipefail
+        if [ -z "$$SANITIZE_SITE" ]; then
+          echo "[sanitize] SANITIZE_SITE is required"
+          exit 1
+        fi
+        if [ ! -f "sites/$$SANITIZE_SITE/site_config.json" ]; then
+          echo "[sanitize] Site $$SANITIZE_SITE does not exist"
+          exit 1
+        fi
+        echo "[sanitize] Muting the email queue in site config"
+        bench --site "$$SANITIZE_SITE" set-config mute_emails 1
+        echo "[sanitize] Disabling outbound integrations in the database"
+        # ponytail: plain SQL on purpose. Saving an Email Account through the ORM makes it
+        # connect to the real IMAP/SMTP server to validate, which is what we are trying to
+        # avoid. Cache is cleared below instead of relying on document hooks.
+        bench --site "$$SANITIZE_SITE" mariadb -e '
+          SET SQL_SAFE_UPDATES = 0;
+          UPDATE `tabEmail Account` SET enable_incoming = 0, enable_outgoing = 0, default_incoming = 0, default_outgoing = 0;
+          UPDATE `tabWebhook` SET enabled = 0;
+          UPDATE `tabNotification` SET enabled = 0;
+          UPDATE `tabAuto Repeat` SET status = "Disabled" WHERE status = "Active";
+          DELETE FROM `tabEmail Queue Recipient`;
+          DELETE FROM `tabEmail Queue`;
+        '
+        if [ -n "$$SANITIZE_SINGLES" ]; then
+          # Single doctypes store their fields as rows in tabSingles, so a doctype belonging to
+          # an app that is not installed simply matches nothing. tabSingles needs no backticks,
+          # which is why this statement can be double quoted and interpolate the variable.
+          singles=$$(echo "$$SANITIZE_SINGLES" | sed 's/ *, */,/g')
+          echo "[sanitize] Disabling single doctypes: $$singles"
+          bench --site "$$SANITIZE_SITE" mariadb -e "
+            SET SQL_SAFE_UPDATES = 0;
+            UPDATE tabSingles SET value = '0' WHERE field = 'enabled' AND FIND_IN_SET(doctype, '$$singles');
+            SELECT 'singles still enabled' AS check_name, COUNT(*) AS still_enabled
+              FROM tabSingles WHERE field = 'enabled' AND value = '1';
+          "
+        fi
+        bench --site "$$SANITIZE_SITE" clear-cache
+        echo "[sanitize] Remaining enabled rows, all counts should be 0:"
+        bench --site "$$SANITIZE_SITE" mariadb -e '
+          SELECT "email accounts" AS check_name, COUNT(*) AS still_enabled FROM `tabEmail Account` WHERE enable_incoming = 1 OR enable_outgoing = 1
+          UNION ALL SELECT "webhooks", COUNT(*) FROM `tabWebhook` WHERE enabled = 1
+          UNION ALL SELECT "notifications", COUNT(*) FROM `tabNotification` WHERE enabled = 1
+          UNION ALL SELECT "auto repeats", COUNT(*) FROM `tabAuto Repeat` WHERE status = "Active"
+          UNION ALL SELECT "queued emails", COUNT(*) FROM `tabEmail Queue`;
+        '
+        echo "[sanitize] Done"
+    environment:
+      SANITIZE_SITE: ${SANITIZE_SITE:-${RESTORE_SITE:-}}
+      # Comma separated Single doctypes whose `enabled` field should be set to 0.
+      SANITIZE_SINGLES: ${SANITIZE_SINGLES:-FCM Settings,TP Twilio Settings,TP Exotel Settings}
+    restart: "no"
