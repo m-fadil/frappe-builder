@@ -78,11 +78,13 @@ Create or edit `apps.json` in the project root:
     "branch": "version-16"
   },
   {
-    "url": "https://oauth2:YOUR_GITHUB_TOKEN@github.com/your-org/private-app.git",
+    "url": "https://oauth2:${GIT_AUTH_TOKEN}@github.com/your-org/private-app.git",
     "branch": "main"
   }
 ]
 ```
+
+> **Private Apps & Secrets:** Store your token in GitHub Repository Secrets as `PRIVATE_APP_PAT`. The CI/CD workflows automatically substitute `${GIT_AUTH_TOKEN}` and inject it via BuildKit secret mount (`--secret id=apps_json`) so credentials never leak into image layers.
 
 ---
 
