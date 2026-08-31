@@ -31,16 +31,7 @@ jobs:
           if [ -n "$APPS_JSON_CONTENT" ]; then
             echo "$APPS_JSON_CONTENT" > /tmp/apps.json
           elif [ -f apps.json ]; then
-            eval "$(python3 -c '
-import json, os, shlex
-try:
-    secrets = json.loads(os.environ.get("SECRETS_CONTEXT", "{}"))
-    for k, v in secrets.items():
-        if k not in ["APPS_JSON", "github_token"]:
-            print(f"export {k}={shlex.quote(str(v))}")
-except Exception as e:
-    pass
-')"
+            eval "$(jq -r 'to_entries[] | select(.key | IN("APPS_JSON","github_token") | not) | "export \(.key)=\(.value|@sh)"' <<<"$SECRETS_CONTEXT")"
             envsubst < apps.json > /tmp/apps.json
           else
             echo "[]" > /tmp/apps.json
@@ -88,16 +79,7 @@ except Exception as e:
           if [ -n "$APPS_JSON_CONTENT" ]; then
             echo "$APPS_JSON_CONTENT" > /tmp/apps.json
           elif [ -f apps.json ]; then
-            eval "$(python3 -c '
-import json, os, shlex
-try:
-    secrets = json.loads(os.environ.get("SECRETS_CONTEXT", "{}"))
-    for k, v in secrets.items():
-        if k not in ["APPS_JSON", "github_token"]:
-            print(f"export {k}={shlex.quote(str(v))}")
-except Exception as e:
-    pass
-')"
+            eval "$(jq -r 'to_entries[] | select(.key | IN("APPS_JSON","github_token") | not) | "export \(.key)=\(.value|@sh)"' <<<"$SECRETS_CONTEXT")"
             envsubst < apps.json > /tmp/apps.json
           else
             echo "[]" > /tmp/apps.json
