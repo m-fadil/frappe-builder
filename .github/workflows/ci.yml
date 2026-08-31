@@ -13,6 +13,11 @@ concurrency:
 permissions:
   contents: read
 
+# vars.CACHE_BUST feeds the CACHE_BUST build-arg, which is referenced inside the
+# `bench init` RUN and thus part of its cache key. Empty = cache hit.
+env:
+  CACHE_BUST: ${{ vars.CACHE_BUST }}
+
 jobs:
   verify:
     name: Verify Build
@@ -25,16 +30,17 @@ jobs:
 
       - name: Prepare apps.json with secrets
         env:
-          # Full override takes precedence if defined in GitHub Secrets
+          # secrets.APPS_JSON, when set, bypasses the in-repo apps.json entirely
           APPS_JSON_CONTENT: ${{ secrets.APPS_JSON }}
-          # Expose all environment secrets (default and app-specific tokens)
+          # toJson(secrets) is the only way to enumerate secret names at runtime
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
           if [ -n "$APPS_JSON_CONTENT" ]; then
             echo "$APPS_JSON_CONTENT" > /tmp/apps.json
           elif [ -f apps.json ]; then
-            # Export all GitHub secrets into the environment so envsubst can replace
-            # any custom token variable (e.g. ${HRMS_PAT}, ${CUSTOM_APP_TOKEN}, ${GITLAB_PAT})
+            # Hoist every secret into the env so envsubst resolves arbitrary
+            # ${TOKEN} placeholders in apps.json. @sh quotes; APPS_JSON and the
+            # auto-provisioned github_token are excluded.
             eval "$(jq -r 'to_entries[] | select(.key | IN("APPS_JSON","github_token") | not) | "export \(.key)=\(.value|@sh)"' <<<"$SECRETS_CONTEXT")"
             envsubst < apps.json > /tmp/apps.json
           else
@@ -48,6 +54,8 @@ jobs:
           file: ./Containerfile
           load: true
           tags: custom-frappe:ci
+          build-args: |
+            CACHE_BUST=${{ env.CACHE_BUST }}
           secrets: |
             id=apps_json,src=/tmp/apps.json
           cache-from: type=gha

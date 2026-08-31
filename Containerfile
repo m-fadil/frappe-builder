@@ -130,6 +130,9 @@ ARG FRAPPE_BRANCH=version-16
 ARG FRAPPE_PATH=https://github.com/frappe/frappe
 ARG CACHE_BUST=""
 
+# `: "${CACHE_BUST}"` is a no-op that pulls the ARG into this RUN's cache key.
+# Without it BuildKit reuses the clone layer even when upstream branches moved,
+# since refs and secret-mount contents are both absent from cache keys.
 RUN --mount=type=secret,id=apps_json,target=/opt/frappe/apps.json,uid=1000,gid=1000 \
   : "${CACHE_BUST}" && \
   export APP_INSTALL_ARGS="" && \

@@ -66,6 +66,45 @@ rm /tmp/apps.json
 | `INSTALL_CHROMIUM` | `true` | Installs `chromium-headless-shell` for PDF/print generation |
 | `CACHE_BUST` | `""` | Arbitrary string to invalidate build cache |
 
+#### Forcing apps to be re-pulled (`CACHE_BUST`)
+
+`bench init` clones every app in one cached layer, so a new commit upstream on an
+unchanged branch will *not* be picked up — BuildKit reuses the layer. `CACHE_BUST`
+is referenced inside that `RUN` (`Containerfile:134`), so changing its value
+invalidates the layer and forces a fresh clone of Frappe and all apps.
+
+Any new value works; a date or the upstream commit SHA is the readable choice.
+
+**Locally:**
+
+```bash
+docker build -f Containerfile --build-arg CACHE_BUST=$(date +%F) -t custom-frappe:local .
+```
+
+**Release workflow, one-off:** Actions → *Release* → **Run workflow** → fill the
+`cache_bust` input. Nothing to commit.
+
+**Automatic on `release.yml`:** a *Resolve upstream app revisions* step runs
+`git ls-remote` against Frappe and every entry in `apps.json`, and folds the
+resulting commit SHAs into `CACHE_BUST`. A new commit on an unchanged branch
+therefore rebuilds on its own — a tag push alone would otherwise reuse the
+cached `bench init` layer and republish identical app code under a new tag.
+The step fails the build if a branch cannot be resolved; URLs may embed PATs,
+so only the 16-char digest is ever printed.
+
+`ci.yml` deliberately skips this: PR builds are frequent and it is a smoke
+test, not a supply-chain gate. Use the variable below to bust CI on demand.
+
+**Every build until changed again:** set a repository variable (Settings → Secrets
+and variables → Actions → *Variables* tab) named `CACHE_BUST`. Both `ci.yml` and
+`release.yml` read `vars.CACHE_BUST`; bump it when you want apps re-pulled, leave
+it empty (or unset) to keep builds cache-warm. The `workflow_dispatch` input
+overrides the variable for that single run.
+
+Pin instead of bust where you can: an exact `branch` or tag per app in
+`apps.json` is reproducible, `CACHE_BUST` is a hammer that rebuilds everything
+from `bench init` onward (~30-45 min).
+
 ---
 
 ## 3. GitHub Actions Workflows
