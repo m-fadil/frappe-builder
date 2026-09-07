@@ -161,8 +161,16 @@ COPY --from=builder --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe
 WORKDIR /home/frappe/frappe-bench
 
 # Move assets to image-layer storage
+#
+# Also pre-create shared-assets as frappe:frappe here: Docker seeds a *new*
+# named volume from whatever exists at its mount path in the image at first
+# mount. This path has no other image-layer content, so without an owned
+# placeholder directory the volume is created with root ownership and
+# main-entrypoint.sh's merge `cp` fails with "Permission denied" for the
+# frappe user at runtime.
 RUN cp -r /home/frappe/frappe-bench/sites/assets /home/frappe/frappe-bench/assets && \
-  rm -rf /home/frappe/frappe-bench/sites/assets
+  rm -rf /home/frappe/frappe-bench/sites/assets && \
+  mkdir -p /home/frappe/frappe-bench/shared-assets
 VOLUME [ \
   "/home/frappe/frappe-bench/sites", \
   "/home/frappe/frappe-bench/logs", \

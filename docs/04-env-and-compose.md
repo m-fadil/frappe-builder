@@ -72,3 +72,45 @@ docker compose --env-file ~/gitops/.env.erpnext-prod logs -f backend
 # Tear down services
 docker compose --env-file ~/gitops/.env.erpnext-prod down
 ```
+
+---
+
+## 4. Creating the First Site
+
+`up -d` starts the stack but creates no site — `configurator` only writes
+`common_site_config.json` (db/redis hosts). `backend` waits on it via
+`condition: service_completed_successfully`, so by the time `up -d` returns,
+`configurator` has already finished and `backend` is up; no manual wait is
+needed.
+
+```bash
+docker compose --env-file ~/gitops/.env.erpnext-prod exec backend \
+  bench new-site erp.example.com \
+  --mariadb-user-host-login-scope='172.%.%.%' \
+  --db-root-password strongpassword \
+  --admin-password admin \
+  --install-app erpnext
+```
+
+- Site name must match what routes to it: the host header with
+  `compose.proxy.yaml`/`compose.https.yaml` (`SITES_RULE`), the configured
+  host with `compose.nginxproxy.yaml` (`NGINX_PROXY_HOSTS`), or
+  `FRAPPE_SITE_NAME_HEADER` when it overrides the default `$$host` lookup.
+- `--mariadb-user-host-login-scope='172.%.%.%'` allows the db user to connect
+  from any container/VM on the Docker bridge (172.0.0.0/8) — container IPs
+  are dynamic, a fixed-IP scope breaks on restart. Only `backend` talks to
+  the database, so this stays safe; tighten it if you expose the db further.
+- `--db-root-password` is `DB_PASSWORD` from the env file (`123` if unset,
+  `changeit` with `compose.mariadb-shared.yaml`).
+- Chain `--install-app <app>` per app baked into the image to install it at
+  site-creation time instead of a separate `install-app` call.
+
+Verify the site answers before pointing DNS/a browser at it:
+
+```bash
+docker compose --env-file ~/gitops/.env.erpnext-prod exec backend \
+  bench --site erp.example.com list-apps
+```
+
+For migrations, backups, and further bench operations against an existing
+site, see [05. Deployment, Rollout & Site Operations](05-deployment-and-operations.md).

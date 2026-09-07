@@ -22,6 +22,18 @@ fi
 # `-L` dereferences the per-app symlinks (assets/frappe -> apps/frappe/.../public)
 # so the volume holds real files, readable by every container.
 mkdir -p "$SHARED_PATH"
+
+# Every backend-family container (backend, frontend, websocket, queue-*,
+# scheduler) runs this same merge on startup. Without serializing, several of
+# them racing `cp -rL` into the same destination tree concurrently corrupts
+# each other's in-flight copies ("cannot create regular file: File exists"),
+# which trips `set -e` and crash-loops the container before the stamp file is
+# ever written. Hold an exclusive flock for the whole check-then-copy so only
+# one container merges per build; the rest block, then see the stamp already
+# written and skip.
+exec 9>"$SHARED_PATH/.merge.lock"
+flock -x 9
+
 # Stamp the whole tree, not just assets.json: that file lists only the hashed
 # bundles, so a build that changes an image, font or favicon would otherwise
 # look identical and get skipped.
@@ -34,6 +46,9 @@ else
   echo "Assets of build $stamp already in volume."
 fi
 
+flock -u 9
+exec 9>&-
+
 # Point sites/assets at the shared volume. The volume is mounted on its own
 # path and linked from here rather than mounted straight onto sites/assets:
 # a mount target that is already a symlink gets resolved to the symlink's
@@ -45,8 +60,6 @@ ln -s "$SHARED_PATH" "$ASSETS_PATH"
 # unchanged bundles keep their name and are just overwritten; only bundles that
 # actually changed pile up. If it ever does grow too big, stop the stack and
 # `docker volume rm <project>_assets`: the next start repopulates it.
-# ponytail: no lock — two containers starting at the exact same second both
-# copy; same bytes, so worst case is wasted IO.
 # ponytail: the stamp compares names and sizes, not content — an edit that
 # keeps a file byte-for-byte the same size is missed. Hashed bundles are
 # unaffected (their name changes); checksum the tree if it ever bites.
