@@ -32,19 +32,29 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: Prepare apps.json with secrets
+      - name: Prepare apps.json and netrc with secrets
         env:
           APPS_JSON_CONTENT: ${{ secrets.APPS_JSON }}
+          # Full .netrc content — see example.netrc for the expected format
+          NETRC_CONTENT: ${{ secrets.NETRC }}
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
           if [ -n "$APPS_JSON_CONTENT" ]; then
             echo "$APPS_JSON_CONTENT" > /tmp/apps.json
           elif [ -f apps.json ]; then
-            eval "$(jq -r 'to_entries[] | select(.key | IN("APPS_JSON","github_token") | not) | "export \(.key)=\(.value|@sh)"' <<<"$SECRETS_CONTEXT")"
+            eval "$(jq -r 'to_entries[] | select(.key | IN("APPS_JSON","NETRC","github_token") | not) | "export \(.key)=\(.value|@sh)"' <<<"$SECRETS_CONTEXT")"
             envsubst < apps.json > /tmp/apps.json
           else
             echo "[]" > /tmp/apps.json
           fi
+
+          # Git's HTTPS transport reads ~/.netrc automatically; installed on
+          # the runner too so the host-side `git ls-remote` below (and not
+          # just the container build) can authenticate to private hosts.
+          printf '%s\n' "$NETRC_CONTENT" > /tmp/netrc
+          chmod 600 /tmp/netrc
+          cp /tmp/netrc "$HOME/.netrc"
+          chmod 600 "$HOME/.netrc"
 
       # Git refs are not part of any layer cache key, and secret mounts are excluded
       # from cache keys by design, so neither a tag push nor an edited apps.json
@@ -76,6 +86,7 @@ jobs:
             CACHE_BUST=${{ env.CACHE_BUST }}-${{ steps.rev.outputs.upstream }}
           secrets: |
             id=apps_json,src=/tmp/apps.json
+            id=netrc,src=/tmp/netrc
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -101,19 +112,29 @@ jobs:
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
 
-      - name: Prepare apps.json with secrets
+      - name: Prepare apps.json and netrc with secrets
         env:
           APPS_JSON_CONTENT: ${{ secrets.APPS_JSON }}
+          # Full .netrc content — see example.netrc for the expected format
+          NETRC_CONTENT: ${{ secrets.NETRC }}
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
           if [ -n "$APPS_JSON_CONTENT" ]; then
             echo "$APPS_JSON_CONTENT" > /tmp/apps.json
           elif [ -f apps.json ]; then
-            eval "$(jq -r 'to_entries[] | select(.key | IN("APPS_JSON","github_token") | not) | "export \(.key)=\(.value|@sh)"' <<<"$SECRETS_CONTEXT")"
+            eval "$(jq -r 'to_entries[] | select(.key | IN("APPS_JSON","NETRC","github_token") | not) | "export \(.key)=\(.value|@sh)"' <<<"$SECRETS_CONTEXT")"
             envsubst < apps.json > /tmp/apps.json
           else
             echo "[]" > /tmp/apps.json
           fi
+
+          # Git's HTTPS transport reads ~/.netrc automatically; installed on
+          # the runner too so the host-side `git ls-remote` below (and not
+          # just the container build) can authenticate to private hosts.
+          printf '%s\n' "$NETRC_CONTENT" > /tmp/netrc
+          chmod 600 /tmp/netrc
+          cp /tmp/netrc "$HOME/.netrc"
+          chmod 600 "$HOME/.netrc"
 
       # Git refs are not part of any layer cache key, and secret mounts are excluded
       # from cache keys by design, so neither a tag push nor an edited apps.json
@@ -170,6 +191,7 @@ jobs:
             CACHE_BUST=${{ env.CACHE_BUST }}-${{ steps.rev.outputs.upstream }}
           secrets: |
             id=apps_json,src=/tmp/apps.json
+            id=netrc,src=/tmp/netrc
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max

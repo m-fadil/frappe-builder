@@ -28,10 +28,12 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: Prepare apps.json with secrets
+      - name: Prepare apps.json and netrc with secrets
         env:
           # secrets.APPS_JSON, when set, bypasses the in-repo apps.json entirely
           APPS_JSON_CONTENT: ${{ secrets.APPS_JSON }}
+          # Full .netrc content — see example.netrc for the expected format
+          NETRC_CONTENT: ${{ secrets.NETRC }}
           # toJson(secrets) is the only way to enumerate secret names at runtime
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
@@ -39,13 +41,18 @@ jobs:
             echo "$APPS_JSON_CONTENT" > /tmp/apps.json
           elif [ -f apps.json ]; then
             # Hoist every secret into the env so envsubst resolves arbitrary
-            # ${TOKEN} placeholders in apps.json. @sh quotes; APPS_JSON and the
-            # auto-provisioned github_token are excluded.
-            eval "$(jq -r 'to_entries[] | select(.key | IN("APPS_JSON","github_token") | not) | "export \(.key)=\(.value|@sh)"' <<<"$SECRETS_CONTEXT")"
+            # ${TOKEN} placeholders in apps.json. @sh quotes; APPS_JSON, NETRC
+            # and the auto-provisioned github_token are excluded.
+            eval "$(jq -r 'to_entries[] | select(.key | IN("APPS_JSON","NETRC","github_token") | not) | "export \(.key)=\(.value|@sh)"' <<<"$SECRETS_CONTEXT")"
             envsubst < apps.json > /tmp/apps.json
           else
             echo "[]" > /tmp/apps.json
           fi
+
+          # Git's HTTPS transport reads ~/.netrc automatically for private
+          # apps.json entries; empty file is a no-op. See example.netrc.
+          printf '%s\n' "$NETRC_CONTENT" > /tmp/netrc
+          chmod 600 /tmp/netrc
 
       - name: Build smoke-test image
         uses: docker/build-push-action@v7
@@ -58,6 +65,7 @@ jobs:
             CACHE_BUST=${{ env.CACHE_BUST }}
           secrets: |
             id=apps_json,src=/tmp/apps.json
+            id=netrc,src=/tmp/netrc
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -28,32 +28,37 @@ A core design rule of this setup is the **strict separation between Build-Time a
 
 | Scope | Artifact / Secret | Where Stored | Handled By |
 |---|---|---|---|
-| **Build-Time** | Git PATs (`CRM_PAT`, `GITLAB_TOKEN`), `apps.json` | GitHub Repository Secrets | BuildKit Secret Mount (`--secret id=apps_json`) |
+| **Build-Time** | Git PATs / `.netrc` (`NETRC`), `apps.json` | GitHub Repository Secrets | BuildKit Secret Mounts (`--secret id=apps_json`, `--secret id=netrc`) |
 | **Runtime** | Database passwords, SMTP keys, API tokens, `.env` files | Target Server / GitOps Repo / CD Secrets | Docker Compose runtime environment (`--env-file`) |
 
 > **Crucial Rule:** The deployment `.env` file is **never baked into the container image**. The image remains a generic, reusable artifact across development, staging, and production environments.
 
 ---
 
-## 2. Local Image Build
-
 Build the production image locally using Docker Buildx:
 
 ```bash
-# Optional: resolve token placeholders for private repositories
+# Optional: resolve token placeholders embedded directly in apps.json URLs
 export CRM_PAT="ghp_xxx"
 envsubst < apps.json > /tmp/apps.json
+
+# Optional: private apps authenticated via .netrc instead (recommended, see
+# docs/02-custom-apps.md) — copy example.netrc to build.netrc and fill in
+# real tokens; build.netrc is gitignored.
 
 docker build \
   --no-cache \
   --build-arg FRAPPE_PATH=https://github.com/frappe/frappe \
   --build-arg FRAPPE_BRANCH=version-16 \
   --secret id=apps_json,src=/tmp/apps.json \
+  --secret id=netrc,src=build.netrc \
   --tag my-org/custom-frappe:16.0.0 \
   --file Containerfile .
 
 rm /tmp/apps.json
 ```
+
+Drop `--secret id=netrc` if none of the apps are private.
 
 ### Build Arguments:
 
@@ -90,7 +95,9 @@ resulting commit SHAs into `CACHE_BUST`. A new commit on an unchanged branch
 therefore rebuilds on its own — a tag push alone would otherwise reuse the
 cached `bench init` layer and republish identical app code under a new tag.
 The step fails the build if a branch cannot be resolved; URLs may embed PATs,
-so only the 16-char digest is ever printed.
+so only the 16-char digest is ever printed. Private apps authenticated via
+`.netrc` instead of an embedded PAT resolve too — the workflow installs the
+`NETRC` secret at the runner's `$HOME/.netrc` before this step runs.
 
 `ci.yml` deliberately skips this: PR builds are frequent and it is a smoke
 test, not a supply-chain gate. Use the variable below to bust CI on demand.

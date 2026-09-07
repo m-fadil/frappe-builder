@@ -9,7 +9,7 @@ No development or debug images. Built strictly for reliable, reproducible produc
 ## Architecture & Key Decisions
 
 - **Single Self-Contained Image:** Frappe framework, official apps (e.g., ERPNext, HRMS), and custom apps are installed and baked during `docker build`. No source-code volume mounts at runtime.
-- **BuildKit Secret Mounts:** `apps.json` (and any embedded Git access tokens) is mounted strictly into build-step memory (`--mount=type=secret,id=apps_json`). Credentials never leak into Docker layer history or `docker inspect`.
+- **BuildKit Secret Mounts:** `apps.json` and a `.netrc` file (for private Git hosts) are mounted strictly into build-step memory (`--mount=type=secret,id=apps_json`, `--mount=type=secret,id=netrc`). Credentials never leak into Docker layer history or `docker inspect`.
 - **Accumulating Shared Assets:** Static assets are baked into image layers and merged by `main-entrypoint.sh` into a shared `shared-assets` volume upon startup. Content hashes avoid collisions and guarantee zero 404s for cached client sessions during rolling deployments.
 - **Dynamic DNS Resolver in Nginx:** Frontend container detects internal DNS (`/etc/resolv.conf`) with a 10s TTL (`valid=10s`), eliminating stale IP caching when backend containers are swapped during rollouts.
 - **Single `.env` Driven Compose:** Drives the entire compose stack without chaining repetitive `-f overrides/...` CLI flags. Define `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME` directly inside your project env file.
@@ -25,6 +25,7 @@ custom_frappe_docker/
 ├── apps.json                      # Custom Frappe apps definition
 ├── compose.yaml                   # Base production Compose definition
 ├── example.env                    # Full environment configuration template
+├── example.netrc                  # Private Git host credentials template (see 02-custom-apps.md)
 ├── rollout.sh                     # Zero-downtime rolling update orchestration script
 ├── verify.sh                      # Post-rollout proxy and asset verification script
 ├── overrides/                     # Modular Compose overrides
@@ -65,7 +66,7 @@ custom_frappe_docker/
 
 ### 1. Configure Apps in `apps.json`
 
-Create or edit `apps.json` in the project root:
+Create or edit `apps.json` in the project root. URLs stay plain, no embedded tokens:
 
 ```json
 [
@@ -78,19 +79,19 @@ Create or edit `apps.json` in the project root:
     "branch": "version-16"
   },
   {
-    "url": "https://oauth2:${GIT_AUTH_TOKEN}@github.com/your-org/private-app.git",
+    "url": "https://github.com/your-org/private-app.git",
     "branch": "main"
   }
 ]
 ```
 
-> **Private Apps & Secrets:** Store your token in GitHub Repository Secrets as `PRIVATE_APP_PAT`. The CI/CD workflows automatically substitute `${GIT_AUTH_TOKEN}` and inject it via BuildKit secret mount (`--secret id=apps_json`) so credentials never leak into image layers.
+> **Private Apps & Secrets:** Authenticate private entries with a `.netrc` file instead of embedding tokens in the URL. Copy [`example.netrc`](example.netrc) to `build.netrc` (gitignored) and fill in real tokens; the CI/CD workflows read the same credentials from a repository secret named `NETRC`. See [02. Custom Apps & Secrets Management](docs/02-custom-apps.md).
 
 ---
 
 ### 2. Build the Production Image
 
-Run BuildKit with the secret mount:
+Run BuildKit with the secret mounts:
 
 ```bash
 docker build \
@@ -98,9 +99,12 @@ docker build \
   --build-arg FRAPPE_PATH=https://github.com/frappe/frappe \
   --build-arg FRAPPE_BRANCH=version-16 \
   --secret id=apps_json,src=apps.json \
+  --secret id=netrc,src=build.netrc \
   --tag ghcr.io/your-org/custom-frappe:16.0.0 \
   --file Containerfile .
 ```
+
+Drop `--secret id=netrc` if none of the apps are private.
 
 ---
 
