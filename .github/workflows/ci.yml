@@ -13,8 +13,9 @@ concurrency:
 permissions:
   contents: read
 
-# vars.CACHE_BUST feeds the CACHE_BUST build-arg, which is referenced inside the
-# `bench init` RUN and thus part of its cache key. Empty = cache hit.
+# vars.CACHE_BUST feeds both split cache-bust build-args, which are referenced
+# inside the `framework`/`apps` stage RUNs and thus part of their cache keys.
+# Empty = cache hit on both.
 env:
   CACHE_BUST: ${{ vars.CACHE_BUST }}
 
@@ -62,7 +63,8 @@ jobs:
           load: true
           tags: custom-frappe:ci
           build-args: |
-            CACHE_BUST=${{ env.CACHE_BUST }}
+            FRAPPE_CACHE_BUST=${{ env.CACHE_BUST }}
+            APPS_CACHE_BUST=${{ env.CACHE_BUST }}
           secrets: |
             id=apps_json,src=/tmp/apps.json
             id=netrc,src=/tmp/netrc

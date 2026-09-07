@@ -95,7 +95,6 @@ Run BuildKit with the secret mounts:
 
 ```bash
 docker build \
-  --no-cache \
   --build-arg FRAPPE_PATH=https://github.com/frappe/frappe \
   --build-arg FRAPPE_BRANCH=version-16 \
   --secret id=apps_json,src=apps.json \

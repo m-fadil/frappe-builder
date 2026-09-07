@@ -124,39 +124,69 @@ RUN apt-get update \
     libbz2-dev \
     && rm -rf /var/lib/apt/lists/*
 
+FROM builder AS framework
+
 USER frappe
 
 ARG FRAPPE_BRANCH=version-16
 ARG FRAPPE_PATH=https://github.com/frappe/frappe
-ARG CACHE_BUST=""
+ARG FRAPPE_CACHE_BUST=""
 
-# `: "${CACHE_BUST}"` is a no-op that pulls the ARG into this RUN's cache key.
-# Without it BuildKit reuses the clone layer even when upstream branches moved,
-# since refs and secret-mount contents are both absent from cache keys.
-RUN --mount=type=secret,id=apps_json,target=/opt/frappe/apps.json,uid=1000,gid=1000 \
-  --mount=type=secret,id=netrc,target=/home/frappe/.netrc,uid=1000,gid=1000,mode=0600 \
-  : "${CACHE_BUST}" && \
-  export APP_INSTALL_ARGS="" && \
-  if [ -f /opt/frappe/apps.json ] && [ -s /opt/frappe/apps.json ]; then \
-    export APP_INSTALL_ARGS="--apps_path=/opt/frappe/apps.json"; \
-  fi && \
-  bench init ${APP_INSTALL_ARGS} \
+# `: "${FRAPPE_CACHE_BUST}"` is a no-op that pulls the ARG into this RUN's cache
+# key. Without it BuildKit reuses this layer even when the Frappe branch moved
+# upstream. Deliberately separate from APPS_CACHE_BUST below: bumping this one
+# does not touch the `apps` stage, and vice versa — updating one custom app no
+# longer forces a re-clone of the Frappe framework itself.
+RUN --mount=type=cache,target=/home/frappe/.cache/uv,uid=1000,gid=1000 \
+  --mount=type=cache,target=/home/frappe/.cache/pip,uid=1000,gid=1000 \
+  --mount=type=cache,target=/home/frappe/.cache/yarn,uid=1000,gid=1000 \
+  : "${FRAPPE_CACHE_BUST}" && \
+  bench init \
     --frappe-branch=${FRAPPE_BRANCH} \
     --frappe-path=${FRAPPE_PATH} \
     --no-procfile \
     --no-backups \
     --skip-redis-config-generation \
+    --skip-assets \
     --verbose \
     /home/frappe/frappe-bench && \
   cd /home/frappe/frappe-bench && \
   echo "{}" > sites/common_site_config.json && \
   find apps -mindepth 1 -path "*/.git" -type d -prune -exec rm -rf {} +
 
+FROM framework AS apps
+
+ARG APPS_CACHE_BUST=""
+
+# `: "${APPS_CACHE_BUST}"` pulls the ARG into this RUN's cache key for the same
+# reason as FRAPPE_CACHE_BUST above, scoped to apps.json instead of Frappe.
+# `bench get-app` is looped explicitly (rather than `bench init --apps_path=`)
+# so this clone+install step lands in its own stage/layer, separate from the
+# Frappe framework bootstrap in the `framework` stage above.
+RUN --mount=type=secret,id=apps_json,target=/opt/frappe/apps.json,uid=1000,gid=1000 \
+  --mount=type=secret,id=netrc,target=/home/frappe/.netrc,uid=1000,gid=1000,mode=0600 \
+  --mount=type=cache,target=/home/frappe/.cache/uv,uid=1000,gid=1000 \
+  --mount=type=cache,target=/home/frappe/.cache/pip,uid=1000,gid=1000 \
+  --mount=type=cache,target=/home/frappe/.cache/yarn,uid=1000,gid=1000 \
+  : "${APPS_CACHE_BUST}" && \
+  cd /home/frappe/frappe-bench && \
+  if [ -f /opt/frappe/apps.json ] && [ -s /opt/frappe/apps.json ]; then \
+    jq -c '.[]' /opt/frappe/apps.json | while IFS= read -r app; do \
+      url=$(echo "$app" | jq -r '.url') && \
+      branch=$(echo "$app" | jq -r '.branch // empty') && \
+      branch_flag="" && \
+      if [ -n "$branch" ]; then branch_flag="--branch $branch"; fi && \
+      bench get-app $branch_flag --skip-assets "$url"; \
+    done; \
+  fi && \
+  BENCH_DEVELOPER=1 bench build && \
+  find apps -mindepth 1 -path "*/.git" -type d -prune -exec rm -rf {} +
+
 FROM base AS backend
 
 USER frappe
 
-COPY --from=builder --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe/frappe-bench
+COPY --from=apps --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe/frappe-bench
 
 WORKDIR /home/frappe/frappe-bench
 

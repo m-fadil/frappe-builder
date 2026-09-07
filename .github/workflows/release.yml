@@ -18,7 +18,10 @@ permissions:
   contents: read
 
 # CACHE_BUST build-arg, manual half. Precedence: dispatch input > vars.CACHE_BUST.
-# Concatenated per build step with steps.rev.outputs.upstream.
+# Concatenated per build step with steps.rev.outputs.frappe / .apps, which fold
+# in resolved upstream commit SHAs so a moved branch busts on its own even
+# without a manual CACHE_BUST bump. Kept as two separate hashes so an app
+# update doesn't force a Frappe framework re-clone, and vice versa.
 env:
   CACHE_BUST: ${{ github.event.inputs.cache_bust || vars.CACHE_BUST }}
 
@@ -58,22 +61,27 @@ jobs:
 
       # Git refs are not part of any layer cache key, and secret mounts are excluded
       # from cache keys by design, so neither a tag push nor an edited apps.json
-      # invalidates `bench init`. Fold resolved upstream SHAs into CACHE_BUST instead.
-      # URLs may carry PATs: emit the digest only, never a resolved URL.
+      # invalidates the `framework`/`apps` stage RUNs. Fold resolved upstream SHAs
+      # into their respective CACHE_BUST args instead, kept separate so an app
+      # commit doesn't bust the Frappe framework clone. URLs may carry PATs: emit
+      # the digest only, never a resolved URL.
       - name: Resolve upstream app revisions
         id: rev
         run: |
           set -eo pipefail
           FRAPPE_PATH=$(grep -oP '^ARG FRAPPE_PATH=\K.*' Containerfile)
           FRAPPE_BRANCH=$(grep -oP '^ARG FRAPPE_BRANCH=\K.*' Containerfile)
-          revs=$(git ls-remote "$FRAPPE_PATH" "$FRAPPE_BRANCH" | cut -f1)
-          [ -n "$revs" ] || { echo "::error::cannot resolve $FRAPPE_BRANCH in frappe"; exit 1; }
+          frappe_sha=$(git ls-remote "$FRAPPE_PATH" "$FRAPPE_BRANCH" | cut -f1)
+          [ -n "$frappe_sha" ] || { echo "::error::cannot resolve $FRAPPE_BRANCH in frappe"; exit 1; }
+          echo "frappe=$(printf '%s\n' "$frappe_sha" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+          app_revs=""
           while IFS=$'\t' read -r url branch; do
             sha=$(git ls-remote "$url" "$branch" | cut -f1)
             [ -n "$sha" ] || { echo "::error::cannot resolve branch '$branch' for an apps.json entry"; exit 1; }
-            revs="$revs $sha"
+            app_revs="$app_revs $sha"
           done < <(jq -r '.[] | "\(.url)\t\(.branch)"' /tmp/apps.json)
-          echo "upstream=$(printf '%s\n' $revs | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "apps=$(printf '%s\n' $app_revs | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Build smoke-test image
         uses: docker/build-push-action@v7
@@ -83,7 +91,8 @@ jobs:
           load: true
           tags: custom-frappe:verify
           build-args: |
-            CACHE_BUST=${{ env.CACHE_BUST }}-${{ steps.rev.outputs.upstream }}
+            FRAPPE_CACHE_BUST=${{ env.CACHE_BUST }}-${{ steps.rev.outputs.frappe }}
+            APPS_CACHE_BUST=${{ env.CACHE_BUST }}-${{ steps.rev.outputs.apps }}
           secrets: |
             id=apps_json,src=/tmp/apps.json
             id=netrc,src=/tmp/netrc
@@ -138,22 +147,27 @@ jobs:
 
       # Git refs are not part of any layer cache key, and secret mounts are excluded
       # from cache keys by design, so neither a tag push nor an edited apps.json
-      # invalidates `bench init`. Fold resolved upstream SHAs into CACHE_BUST instead.
-      # URLs may carry PATs: emit the digest only, never a resolved URL.
+      # invalidates the `framework`/`apps` stage RUNs. Fold resolved upstream SHAs
+      # into their respective CACHE_BUST args instead, kept separate so an app
+      # commit doesn't bust the Frappe framework clone. URLs may carry PATs: emit
+      # the digest only, never a resolved URL.
       - name: Resolve upstream app revisions
         id: rev
         run: |
           set -eo pipefail
           FRAPPE_PATH=$(grep -oP '^ARG FRAPPE_PATH=\K.*' Containerfile)
           FRAPPE_BRANCH=$(grep -oP '^ARG FRAPPE_BRANCH=\K.*' Containerfile)
-          revs=$(git ls-remote "$FRAPPE_PATH" "$FRAPPE_BRANCH" | cut -f1)
-          [ -n "$revs" ] || { echo "::error::cannot resolve $FRAPPE_BRANCH in frappe"; exit 1; }
+          frappe_sha=$(git ls-remote "$FRAPPE_PATH" "$FRAPPE_BRANCH" | cut -f1)
+          [ -n "$frappe_sha" ] || { echo "::error::cannot resolve $FRAPPE_BRANCH in frappe"; exit 1; }
+          echo "frappe=$(printf '%s\n' "$frappe_sha" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+          app_revs=""
           while IFS=$'\t' read -r url branch; do
             sha=$(git ls-remote "$url" "$branch" | cut -f1)
             [ -n "$sha" ] || { echo "::error::cannot resolve branch '$branch' for an apps.json entry"; exit 1; }
-            revs="$revs $sha"
+            app_revs="$app_revs $sha"
           done < <(jq -r '.[] | "\(.url)\t\(.branch)"' /tmp/apps.json)
-          echo "upstream=$(printf '%s\n' $revs | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "apps=$(printf '%s\n' $app_revs | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -188,7 +202,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
           build-args: |
-            CACHE_BUST=${{ env.CACHE_BUST }}-${{ steps.rev.outputs.upstream }}
+            FRAPPE_CACHE_BUST=${{ env.CACHE_BUST }}-${{ steps.rev.outputs.frappe }}
+            APPS_CACHE_BUST=${{ env.CACHE_BUST }}-${{ steps.rev.outputs.apps }}
           secrets: |
             id=apps_json,src=/tmp/apps.json
             id=netrc,src=/tmp/netrc

@@ -47,7 +47,6 @@ envsubst < apps.json > /tmp/apps.json
 # real tokens; build.netrc is gitignored.
 
 docker build \
-  --no-cache \
   --build-arg FRAPPE_PATH=https://github.com/frappe/frappe \
   --build-arg FRAPPE_BRANCH=version-16 \
   --secret id=apps_json,src=/tmp/apps.json \
@@ -58,7 +57,9 @@ docker build \
 rm /tmp/apps.json
 ```
 
-Drop `--secret id=netrc` if none of the apps are private.
+Drop `--secret id=netrc` if none of the apps are private. `--no-cache` is
+deliberately **not** used here — see [Stage layout](#stage-layout--why-not-no-cache)
+below for why it defeats the whole point of the two-stage split.
 
 ### Build Arguments:
 
@@ -69,48 +70,87 @@ Drop `--secret id=netrc` if none of the apps are private.
 | `PYTHON_VERSION` | `3.14` | Base Python runtime version |
 | `NODE_VERSION` | `24` | Node.js runtime for asset compilation |
 | `INSTALL_CHROMIUM` | `true` | Installs `chromium-headless-shell` for PDF/print generation |
-| `CACHE_BUST` | `""` | Arbitrary string to invalidate build cache |
+| `FRAPPE_CACHE_BUST` | `""` | Arbitrary string to invalidate the `framework` stage (Frappe clone) |
+| `APPS_CACHE_BUST` | `""` | Arbitrary string to invalidate the `apps` stage (custom apps clone + asset build) |
 
-#### Forcing apps to be re-pulled (`CACHE_BUST`)
+### Stage layout & why not `--no-cache`
 
-`bench init` clones every app in one cached layer, so a new commit upstream on an
-unchanged branch will *not* be picked up — BuildKit reuses the layer. `CACHE_BUST`
-is referenced inside that `RUN` (`Containerfile:134`), so changing its value
-invalidates the layer and forces a fresh clone of Frappe and all apps.
+The `Containerfile` deliberately keeps the expensive, rarely-changing setup
+separate from the part that changes on every app release:
+
+```text
+base      OS packages, Node via nvm, wkhtmltopdf, chromium, nginx
+  └─ builder    + compiler toolchain (gcc, build-essential, dev headers)
+       └─ framework   bench init (Frappe framework only, no custom apps)
+            └─ apps        bench get-app loop over apps.json + bench build
+                 └─ backend    (from `base`) copies the built bench dir in, slim runtime image
+```
+
+Updating one app in `apps.json`, or bumping `APPS_CACHE_BUST`, only
+invalidates the `apps` stage — the `framework` stage (Frappe clone) and
+everything in `base`/`builder` (apt packages, Node, chromium, wkhtmltopdf)
+stay cache-hit. Bumping `FRAPPE_CACHE_BUST` only re-clones Frappe, without
+touching custom apps. `pip`/`uv` and `yarn` caches are also persisted across
+builds via BuildKit cache mounts (`/home/frappe/.cache/{uv,pip,yarn}`), so
+even a full re-clone reinstalls dependencies from a warm cache instead of
+redownloading everything.
+
+**This only works with cache preserved.** `--no-cache` wipes every stage,
+including `base`/`builder`, on every single build — for local iteration,
+prefer the `CACHE_BUST` args below to force-refresh only the stage that
+actually needs it.
+
+#### Forcing apps or Frappe to be re-pulled (`FRAPPE_CACHE_BUST` / `APPS_CACHE_BUST`)
+
+A new commit upstream on an unchanged branch will *not* be picked up by
+itself — BuildKit reuses the layer. `FRAPPE_CACHE_BUST` is referenced inside
+the `framework` stage's `RUN` (`Containerfile`, `framework` stage), and
+`APPS_CACHE_BUST` inside the `apps` stage's `RUN`; changing either value
+invalidates only that stage's clone+install+build.
 
 Any new value works; a date or the upstream commit SHA is the readable choice.
 
 **Locally:**
 
 ```bash
-docker build -f Containerfile --build-arg CACHE_BUST=$(date +%F) -t custom-frappe:local .
+# Re-pull only custom apps, keep the cached Frappe clone
+docker build -f Containerfile --build-arg APPS_CACHE_BUST=$(date +%F) -t custom-frappe:local .
+
+# Re-pull Frappe itself (and, since apps build against it, apps too)
+docker build -f Containerfile --build-arg FRAPPE_CACHE_BUST=$(date +%F) --build-arg APPS_CACHE_BUST=$(date +%F) -t custom-frappe:local .
 ```
 
 **Release workflow, one-off:** Actions → *Release* → **Run workflow** → fill the
-`cache_bust` input. Nothing to commit.
+`cache_bust` input. Nothing to commit; it feeds both args.
 
 **Automatic on `release.yml`:** a *Resolve upstream app revisions* step runs
-`git ls-remote` against Frappe and every entry in `apps.json`, and folds the
-resulting commit SHAs into `CACHE_BUST`. A new commit on an unchanged branch
-therefore rebuilds on its own — a tag push alone would otherwise reuse the
-cached `bench init` layer and republish identical app code under a new tag.
-The step fails the build if a branch cannot be resolved; URLs may embed PATs,
-so only the 16-char digest is ever printed. Private apps authenticated via
-`.netrc` instead of an embedded PAT resolve too — the workflow installs the
-`NETRC` secret at the runner's `$HOME/.netrc` before this step runs.
+`git ls-remote` against Frappe and every entry in `apps.json` separately, and
+folds the resulting commit SHAs into two independent digests:
+`steps.rev.outputs.frappe` (Frappe branch only) and `steps.rev.outputs.apps`
+(every `apps.json` entry, hashed together). A new commit on an unchanged
+branch therefore rebuilds only the stage it actually touches — a tag push
+alone would otherwise reuse the cached layer and republish identical code
+under a new tag. The step fails the build if a branch cannot be resolved;
+URLs may embed PATs, so only the 16-char digest is ever printed. Private apps
+authenticated via `.netrc` instead of an embedded PAT resolve too — the
+workflow installs the `NETRC` secret at the runner's `$HOME/.netrc` before
+this step runs.
 
 `ci.yml` deliberately skips this: PR builds are frequent and it is a smoke
 test, not a supply-chain gate. Use the variable below to bust CI on demand.
 
 **Every build until changed again:** set a repository variable (Settings → Secrets
 and variables → Actions → *Variables* tab) named `CACHE_BUST`. Both `ci.yml` and
-`release.yml` read `vars.CACHE_BUST`; bump it when you want apps re-pulled, leave
-it empty (or unset) to keep builds cache-warm. The `workflow_dispatch` input
+`release.yml` read `vars.CACHE_BUST` and feed it into both `FRAPPE_CACHE_BUST`
+and `APPS_CACHE_BUST`; bump it when you want everything re-pulled, leave it
+empty (or unset) to keep builds cache-warm. The `workflow_dispatch` input
 overrides the variable for that single run.
 
 Pin instead of bust where you can: an exact `branch` or tag per app in
-`apps.json` is reproducible, `CACHE_BUST` is a hammer that rebuilds everything
-from `bench init` onward (~30-45 min).
+`apps.json` is reproducible. `APPS_CACHE_BUST` only rebuilds the `apps` stage
+(clone + install + asset build for all apps, still ~5-15 min depending on app
+count); `FRAPPE_CACHE_BUST` additionally rebuilds `framework` and, since `apps`
+is layered on top of it, cascades into a rebuild of `apps` too.
 
 ---
 

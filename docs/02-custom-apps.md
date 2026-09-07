@@ -79,7 +79,6 @@ cp example.netrc build.netrc   # build.netrc is gitignored — real tokens go on
 chmod 600 build.netrc
 
 docker build \
-  --no-cache \
   --build-arg FRAPPE_PATH=https://github.com/frappe/frappe \
   --build-arg FRAPPE_BRANCH=version-16 \
   --secret id=apps_json,src=apps.json \
@@ -133,7 +132,6 @@ envsubst < apps.json > /tmp/apps.json
 
 # Build with BuildKit secret mount
 docker build \
-  --no-cache \
   --build-arg FRAPPE_PATH=https://github.com/frappe/frappe \
   --build-arg FRAPPE_BRANCH=version-16 \
   --secret id=apps_json,src=/tmp/apps.json \
